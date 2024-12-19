@@ -130,7 +130,7 @@ int test_rewriteClientCommandArgument(int argc, char **argv, int flags) {
     return 0;
 }
 
-static client* createTestClient(void) {
+static client *createTestClient(void) {
     client *c = zcalloc(sizeof(client));
 
     c->buf = zmalloc_usable(PROTO_REPLY_CHUNK_BYTES, &c->buf_usable_size);
@@ -154,18 +154,18 @@ int test_addRepliesWithOffloadsToBuffer(int argc, char **argv, int flags) {
     UNUSED(argv);
     UNUSED(flags);
 
-    client * c = createTestClient();
+    client *c = createTestClient();
 
     /* Test 1:  Add bulk offloads to the buffer */
     robj *obj = createObject(OBJ_STRING, sdscatfmt(sdsempty(), "test"));
     _addBulkOffloadToBufferOrList(c, obj);
 
     TEST_ASSERT(obj->refcount == 2);
-    TEST_ASSERT(c->bufpos == sizeof(payloadHeader) + sizeof(void*));
+    TEST_ASSERT(c->bufpos == sizeof(payloadHeader) + sizeof(void *));
 
     payloadHeader *header1 = c->last_header;
-    TEST_ASSERT(header1->type == CLIENT_REPLY_PAYLOAD_BULK_OFFLOAD);
-    TEST_ASSERT(header1->len == sizeof(void*));
+    TEST_ASSERT(header1->type == CLIENT_REPLY_BULK_OFFLOAD);
+    TEST_ASSERT(header1->len == sizeof(void *));
 
     robj **ptr = (robj **)(c->buf + sizeof(payloadHeader));
     TEST_ASSERT(obj == *ptr);
@@ -173,37 +173,40 @@ int test_addRepliesWithOffloadsToBuffer(int argc, char **argv, int flags) {
     robj *obj2 = createObject(OBJ_STRING, sdscatfmt(sdsempty(), "test2"));
     _addBulkOffloadToBufferOrList(c, obj2);
 
-    TEST_ASSERT(c->bufpos == sizeof(payloadHeader) + 2 * sizeof(void*));
-    TEST_ASSERT(header1->type == CLIENT_REPLY_PAYLOAD_BULK_OFFLOAD);
-    TEST_ASSERT(header1->len == 2 * sizeof(void*));
+    /* 2 offloads expected in c->buf */
+    TEST_ASSERT(c->bufpos == sizeof(payloadHeader) + 2 * sizeof(void *));
+    TEST_ASSERT(header1->type == CLIENT_REPLY_BULK_OFFLOAD);
+    TEST_ASSERT(header1->len == 2 * sizeof(void *));
 
-    ptr = (robj **)(c->buf + sizeof(payloadHeader) + sizeof(void*));
+    ptr = (robj **)(c->buf + sizeof(payloadHeader) + sizeof(void *));
     TEST_ASSERT(obj2 == *ptr);
 
     /* Test 2:  Add plain reply to the buffer */
-    const char* plain = "+OK\r\n";
+    const char *plain = "+OK\r\n";
     size_t plain_len = strlen(plain);
     _addReplyToBufferOrList(c, plain, plain_len);
 
-    TEST_ASSERT(c->bufpos == 2 * sizeof(payloadHeader) + 2 * sizeof(void*) + plain_len);
-    TEST_ASSERT(header1->type == CLIENT_REPLY_PAYLOAD_BULK_OFFLOAD);
-    TEST_ASSERT(header1->len == 2 * sizeof(void*));
+    /* 2 offloads and plain reply expected in c->buf. So 2 headers expected as well */
+    TEST_ASSERT(c->bufpos == 2 * sizeof(payloadHeader) + 2 * sizeof(void *) + plain_len);
+    TEST_ASSERT(header1->type == CLIENT_REPLY_BULK_OFFLOAD);
+    TEST_ASSERT(header1->len == 2 * sizeof(void *));
     payloadHeader *header2 = c->last_header;
-    TEST_ASSERT(header2->type == CLIENT_REPLY_PAYLOAD_DATA);
+    TEST_ASSERT(header2->type == CLIENT_REPLY_PLAIN);
     TEST_ASSERT(header2->len == plain_len);
 
+    /* Add more plain replies. Check same plain reply header updated properly */
     for (int i = 0; i < 9; ++i) _addReplyToBufferOrList(c, plain, plain_len);
-    TEST_ASSERT(c->bufpos == 2 * sizeof(payloadHeader) + 2 * sizeof(void*) + 10 * plain_len);
-    TEST_ASSERT(header2->type == CLIENT_REPLY_PAYLOAD_DATA);
+    TEST_ASSERT(c->bufpos == 2 * sizeof(payloadHeader) + 2 * sizeof(void *) + 10 * plain_len);
+    TEST_ASSERT(header2->type == CLIENT_REPLY_PLAIN);
     TEST_ASSERT(header2->len == plain_len * 10);
 
     /* Test 3:  Add one more bulk offload to the buffer */
     _addBulkOffloadToBufferOrList(c, obj);
     TEST_ASSERT(obj->refcount == 3);
-    TEST_ASSERT(c->bufpos == 3 * sizeof(payloadHeader) + 3 * sizeof(void*) + 10 * plain_len);
+    TEST_ASSERT(c->bufpos == 3 * sizeof(payloadHeader) + 3 * sizeof(void *) + 10 * plain_len);
     payloadHeader *header3 = c->last_header;
-    TEST_ASSERT(header3->type == CLIENT_REPLY_PAYLOAD_BULK_OFFLOAD);
-    ptr = (robj **)((char*)c->last_header + sizeof(payloadHeader));
+    TEST_ASSERT(header3->type == CLIENT_REPLY_BULK_OFFLOAD);
+    ptr = (robj **)((char *)c->last_header + sizeof(payloadHeader));
     TEST_ASSERT(obj == *ptr);
 
     decrRefCount(obj);
@@ -227,31 +230,32 @@ int test_addRepliesWithOffloadsToList(int argc, char **argv, int flags) {
 
     /* Test 1:  Add bulk offloads to the reply list */
 
-    /* Reply len to fill the buffer almost completely */
+    /* Fill c->buf almost completely */
     size_t reply_len = c->buf_usable_size - 2 * sizeof(payloadHeader) - 4;
-
     char *reply = zmalloc(reply_len);
     memset(reply, 'a', reply_len);
     _addReplyToBufferOrList(c, reply, reply_len);
     TEST_ASSERT(c->bufpos == sizeof(payloadHeader) + reply_len);
     TEST_ASSERT(listLength(c->reply) == 0);
 
+    /* As bulk offload header+pointer can't be accommodated in c->buf
+     * then one block is expected in c->reply */
     robj *obj = createObject(OBJ_STRING, sdscatfmt(sdsempty(), "test"));
     _addBulkOffloadToBufferOrList(c, obj);
-
     TEST_ASSERT(obj->refcount == 2);
     TEST_ASSERT(c->bufpos == sizeof(payloadHeader) + reply_len);
     TEST_ASSERT(listLength(c->reply) == 1);
 
+    /* Check bulk offload header+pointer inside c->reply */
     listIter iter;
     listRewind(c->reply, &iter);
     listNode *next = listNext(&iter);
     clientReplyBlock *blk = listNodeValue(next);
 
-    TEST_ASSERT(blk->used == sizeof(payloadHeader) + sizeof(void*));
+    TEST_ASSERT(blk->used == sizeof(payloadHeader) + sizeof(void *));
     payloadHeader *header1 = blk->last_header;
-    TEST_ASSERT(header1->type == CLIENT_REPLY_PAYLOAD_BULK_OFFLOAD);
-    TEST_ASSERT(header1->len == sizeof(void*));
+    TEST_ASSERT(header1->type == CLIENT_REPLY_BULK_OFFLOAD);
+    TEST_ASSERT(header1->len == sizeof(void *));
 
     robj **ptr = (robj **)(blk->buf + sizeof(payloadHeader));
     TEST_ASSERT(obj == *ptr);
@@ -260,9 +264,9 @@ int test_addRepliesWithOffloadsToList(int argc, char **argv, int flags) {
     _addBulkOffloadToBufferOrList(c, obj);
     TEST_ASSERT(obj->refcount == 3);
     TEST_ASSERT(listLength(c->reply) == 1);
-    TEST_ASSERT(blk->used == sizeof(payloadHeader) + 2 * sizeof(void*));
-    TEST_ASSERT(header1->type == CLIENT_REPLY_PAYLOAD_BULK_OFFLOAD);
-    TEST_ASSERT(header1->len == 2 * sizeof(void*));
+    TEST_ASSERT(blk->used == sizeof(payloadHeader) + 2 * sizeof(void *));
+    TEST_ASSERT(header1->type == CLIENT_REPLY_BULK_OFFLOAD);
+    TEST_ASSERT(header1->len == 2 * sizeof(void *));
 
     /* Test 3: Add plain replies to cause reply list grow  */
     while (reply_len < blk->size - blk->used) _addReplyToBufferOrList(c, reply, reply_len);
@@ -277,12 +281,14 @@ int test_addRepliesWithOffloadsToList(int argc, char **argv, int flags) {
     clientReplyBlock *blk2 = listNodeValue(next);
     /* last header in 2nd block */
     payloadHeader *header3 = blk2->last_header;
-    TEST_ASSERT(header2->type == CLIENT_REPLY_PAYLOAD_DATA && header3->type == CLIENT_REPLY_PAYLOAD_DATA);
+    TEST_ASSERT(header2->type == CLIENT_REPLY_PLAIN && header3->type == CLIENT_REPLY_PLAIN);
     TEST_ASSERT((header2->len + header3->len) % reply_len == 0);
 
     decrRefCount(obj);
     decrRefCount(obj);
     decrRefCount(obj);
+
+    zfree(reply);
 
     freeReplyOffloadClient(c);
 
@@ -294,7 +300,7 @@ int test_addBufferToReplyIOV(int argc, char **argv, int flags) {
     UNUSED(argv);
     UNUSED(flags);
 
-    const char* expected_reply = "$5\r\nhello\r\n";
+    const char *expected_reply = "$5\r\nhello\r\n";
     ssize_t total_len = strlen(expected_reply);
     const int iovmax = 16;
     char crlf[2] = {'\r', '\n'};
@@ -314,7 +320,7 @@ int test_addBufferToReplyIOV(int argc, char **argv, int flags) {
 
     TEST_ASSERT(reply.iov_len_total == total_len);
     TEST_ASSERT(reply.cnt == 3);
-    const char* ptr = expected_reply;
+    const char *ptr = expected_reply;
     for (int i = 0; i < reply.cnt; ++i) {
         TEST_ASSERT(memcmp(ptr, reply.iov[i].iov_base, reply.iov[i].iov_len) == 0);
         ptr += reply.iov[i].iov_len;
@@ -335,12 +341,12 @@ int test_addBufferToReplyIOV(int argc, char **argv, int flags) {
     initReplyIOV(c, iovmax, iov_arr2, prefixes2, crlf, &reply2);
     addBufferToReplyIOV(c->buf, c->bufpos, &reply2, &metadata2[0]);
     TEST_ASSERT(reply2.iov_len_total == total_len - 1);
-    TEST_ASSERT((*(char*)reply2.iov[0].iov_base) == '5');
+    TEST_ASSERT((*(char *)reply2.iov[0].iov_base) == '5');
 
     /* Test 4: Last written buf/pos/data_len after 2nd invocation */
     saveLastWrittenBuf(c, metadata2, 1, reply2.iov_len_total, 4); /* 4 more bytes has been written */
     TEST_ASSERT(c->io_last_written_buf == c->buf);
-    TEST_ASSERT(c->io_last_written_bufpos == 0); /* incomplete write */
+    TEST_ASSERT(c->io_last_written_bufpos == 0);   /* incomplete write */
     TEST_ASSERT(c->io_last_written_data_len == 5); /* 1 + 4 */
 
     /* Test 5: 3rd writevToclient invocation */
@@ -352,7 +358,7 @@ int test_addBufferToReplyIOV(int argc, char **argv, int flags) {
     initReplyIOV(c, iovmax, iov_arr3, prefixes3, crlf, &reply3);
     addBufferToReplyIOV(c->buf, c->bufpos, &reply3, &metadata3[0]);
     TEST_ASSERT(reply3.iov_len_total == total_len - 5);
-    TEST_ASSERT((*(char*)reply3.iov[0].iov_base) == 'e');
+    TEST_ASSERT((*(char *)reply3.iov[0].iov_base) == 'e');
 
     /* Test 6: Last written buf/pos/data_len after 3rd invocation */
     saveLastWrittenBuf(c, metadata3, 1, reply3.iov_len_total, reply3.iov_len_total); /* everything has been written */
